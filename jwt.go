@@ -28,8 +28,22 @@ type Token struct {
 	Method SigningMethod
 	// This is only populated when you Parse a token
 	Signature string
-	// This is only populated when you Parse/Verify a token
-	Valid bool
+}
+
+type ParseError struct {
+	msg        string
+	Violations map[string]bool
+}
+
+func (e *ParseError) Error() string {
+	msg := e.msg
+	if len(e.Violations) > 0 {
+		msg += ": Violations were seen for: "
+	}
+	for k, _ := range e.Violations {
+		msg += k + ","
+	}
+	return msg
 }
 
 func New(method SigningMethod) (token *Token, err error) {
@@ -90,6 +104,9 @@ func (t *Token) SigningString() (string, error) {
 // keyFunc will receive the parsed token and should return the key for validating.
 // If everything is kosher, err will be nil
 func Parse(tokenString string, keyFunc Keyfunc) (token *Token, err error) {
+	perr := &ParseError{}
+	perr.Violations = make(map[string]bool)
+
 	parts := strings.Split(tokenString, ".")
 	if len(parts) == 3 {
 		token = &Token{Raw: tokenString}
@@ -125,15 +142,16 @@ func Parse(tokenString string, keyFunc Keyfunc) (token *Token, err error) {
 		// Check expiration times
 		now := TimeFunc().Unix()
 		if exp, ok := token.Claims["exp"].(float64); ok {
+
 			if now > int64(exp) {
-				err = errors.New("Token is expired")
-				return
+				perr.msg = "Token has expired"
+				perr.Violations["exp"] = true
 			}
 		}
 		if nbf, ok := token.Claims["nbf"].(float64); ok {
 			if now < int64(nbf) {
-				err = errors.New("Token is not valid yet")
-				return
+				perr.msg = "Token not valid yet"
+				perr.Violations["nbf"] = true
 			}
 		}
 
@@ -144,16 +162,20 @@ func Parse(tokenString string, keyFunc Keyfunc) (token *Token, err error) {
 		}
 
 		// Perform validation
-		if err = token.Method.Verify(strings.Join(parts[0:2], "."), parts[2], key); err == nil {
-			token.Valid = true
-		} else {
-			return
+		err = token.Method.Verify(strings.Join(parts[0:2], "."), parts[2], key)
+		if err != nil {
+			perr.msg = "Token failed signature verification"
+			perr.Violations["sig"] = true
 		}
-
 	} else {
 		err = errors.New("Token contains an invalid number of segments")
 		return
 	}
+
+	if perr.msg != "" {
+		err = perr
+	}
+
 	return
 }
 
